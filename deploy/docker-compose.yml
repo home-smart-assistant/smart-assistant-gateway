@@ -1,0 +1,77 @@
+﻿services:
+  smart_assistant_gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      Services__AgentBaseUrl: http://smart_assistant_agent:8091
+      Services__HomeAssistantBridgeBaseUrl: http://smart_assistant_ha_bridge:8092
+      Services__WakeCoordinatorBaseUrl: http://smart_assistant_wake_coordinator:8093
+    ports:
+      - "8080:8080"
+    depends_on:
+      - smart_assistant_agent
+      - smart_assistant_ha_bridge
+      - smart_assistant_wake_coordinator
+
+  smart_assistant_agent:
+    build:
+      context: ../../smart_assistant_agent
+      dockerfile: Dockerfile
+    environment:
+      HA_BRIDGE_URL: http://smart_assistant_ha_bridge:8092
+      AGENT_MEMORY_MAX_TURNS: ${AGENT_MEMORY_MAX_TURNS:-12}
+      AGENT_TOOL_AUTO_EXECUTE: ${AGENT_TOOL_AUTO_EXECUTE:-true}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "8091:8091"
+    depends_on:
+      - redis
+      - postgres
+      - smart_assistant_ha_bridge
+
+  smart_assistant_ha_bridge:
+    build:
+      context: ../../smart_assistant_ha_bridge
+      dockerfile: Dockerfile
+    environment:
+      HA_ENABLED: ${HA_ENABLED:-false}
+      HA_BASE_URL: ${HA_BASE_URL}
+      HA_TOKEN: ${HA_TOKEN}
+    ports:
+      - "8092:8092"
+
+  smart_assistant_wake_coordinator:
+    build:
+      context: ../../smart_assistant_wake_coordinator
+      dockerfile: Dockerfile
+    environment:
+      WAKE_LOCK_TTL_MS: ${WAKE_LOCK_TTL_MS:-8000}
+      REDIS_URL: redis://redis:6379/1
+    ports:
+      - "8093:8093"
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - sa_pg_data:/var/lib/postgresql/data
+
+volumes:
+  sa_pg_data:
+
+

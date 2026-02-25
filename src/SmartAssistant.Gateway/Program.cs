@@ -1,5 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
@@ -16,7 +18,7 @@ namespace SmartAssistant.Gateway;
 
 public class Program
 {
-	private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+	private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
 	{
 		PropertyNameCaseInsensitive = true
 	};
@@ -26,89 +28,112 @@ public class Program
 		WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 		builder.Services.AddEndpointsApiExplorer();
 		builder.Services.AddSwaggerGen();
-		builder.Services.AddHttpClient("agent", delegate(HttpClient client)
+		builder.Services.AddHttpClient("agent", client =>
 		{
 			string uriString = builder.Configuration["Services:AgentBaseUrl"] ?? "http://localhost:8091";
 			client.BaseAddress = new Uri(uriString);
 		});
-		builder.Services.AddHttpClient("haBridge", delegate(HttpClient client)
+		builder.Services.AddHttpClient("haBridge", client =>
 		{
 			string uriString = builder.Configuration["Services:HomeAssistantBridgeBaseUrl"] ?? "http://localhost:8092";
 			client.BaseAddress = new Uri(uriString);
 		});
-		WebApplication webApplication = builder.Build();
-		webApplication.UseSwagger();
-		webApplication.UseSwaggerUI();
-		webApplication.UseWebSockets();
-		ConcurrentDictionary<string, SessionState> sessions = new ConcurrentDictionary<string, SessionState>();
-		webApplication.MapGet("/health", (Func<IHttpClientFactory, CancellationToken, Task<IResult>>)async delegate(IHttpClientFactory httpClientFactory, CancellationToken ct)
+		builder.Services.AddHttpClient("wakeCoordinator", client =>
+		{
+			string uriString = builder.Configuration["Services:WakeCoordinatorBaseUrl"] ?? "http://localhost:8093";
+			client.BaseAddress = new Uri(uriString);
+		});
+
+		WebApplication app = builder.Build();
+		app.UseSwagger();
+		app.UseSwaggerUI();
+		app.UseWebSockets();
+
+		ConcurrentDictionary<string, SessionState> sessions = new();
+
+		app.MapGet("/health", async (IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 		{
 			bool agentAlive = await ProbeAsync(httpClientFactory.CreateClient("agent"), ct);
-			bool flag = await ProbeAsync(httpClientFactory.CreateClient("haBridge"), ct);
+			bool haAlive = await ProbeAsync(httpClientFactory.CreateClient("haBridge"), ct);
+			bool wakeCoordinatorAlive = await ProbeAsync(httpClientFactory.CreateClient("wakeCoordinator"), ct);
+
 			return Results.Ok(new
 			{
 				service = "smart_assistant_gateway",
 				status = "ok",
 				downstream = new
 				{
-					agent = (agentAlive ? "ok" : "degraded"),
-					haBridge = (flag ? "ok" : "degraded")
+					agent = agentAlive ? "ok" : "degraded",
+					haBridge = haAlive ? "ok" : "degraded",
+					wakeCoordinator = wakeCoordinatorAlive ? "ok" : "degraded"
 				},
 				time = DateTimeOffset.UtcNow
 			});
 		});
-		webApplication.MapPost("/session/start", (Func<SessionStartRequest, IResult>)(([FromBody] SessionStartRequest request) =>
+
+		app.MapPost("/session/start", ([FromBody] SessionStartRequest request) =>
 		{
-			string text = Guid.NewGuid().ToString("N");
-			SessionState sessionState = new SessionState(text, request.DeviceId, DateTimeOffset.UtcNow);
-			sessions[text] = sessionState;
-			return Results.Ok(new SessionStartResponse(text, sessionState.CreatedAt, "hybrid"));
-		}));
-		webApplication.MapPost("/turn/text", (Func<TurnTextRequest, IHttpClientFactory, CancellationToken, Task<IResult>>)(async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			string sessionId = Guid.NewGuid().ToString("N");
+			SessionState session = new(sessionId, request.DeviceId, DateTimeOffset.UtcNow);
+			sessions[sessionId] = session;
+			return Results.Ok(new SessionStartResponse(sessionId, session.CreatedAt, "hybrid"));
+		});
+
+		app.MapPost("/turn/text", async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			await HandleTextTurnAsync(request, sessions, httpClientFactory, ct));
+
+		app.MapPost("/api/assistant/text-turn", async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			await HandleTextTurnAsync(request, sessions, httpClientFactory, ct));
+
+		app.MapPost("/api/assistant/turn", async (HttpContext context, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 		{
-			if (string.IsNullOrWhiteSpace(request.Text))
+			if (!context.Request.HasFormContentType)
 			{
-				return Results.BadRequest(new
+				return Results.BadRequest(new { error = "multipart/form-data required" });
+			}
+
+			IFormCollection form = await context.Request.ReadFormAsync(ct);
+			bool hasAudio = form.Files.Any(file => string.Equals(file.Name, "audio", StringComparison.OrdinalIgnoreCase));
+			string debugText = form["text"].FirstOrDefault() ?? string.Empty;
+
+			TurnTextRequest request = new()
+			{
+				SessionId = form["session_id"].FirstOrDefault(),
+				DeviceId = form["device_id"].FirstOrDefault(),
+				HomeId = form["home_id"].FirstOrDefault(),
+				WakeToken = form["wake_token"].FirstOrDefault(),
+				Text = string.IsNullOrWhiteSpace(debugText)
+					? (hasAudio ? "语音输入（网关调试模式）" : "语音输入")
+					: debugText,
+				Metadata = new Dictionary<string, string>
 				{
-					error = "text is required"
-				});
-			}
-			string sessionId = request.SessionId;
-			if (string.IsNullOrWhiteSpace(sessionId))
-			{
-				sessionId = Guid.NewGuid().ToString("N");
-			}
-			sessions.AddOrUpdate(sessionId, (string _) => new SessionState(sessionId, request.DeviceId, DateTimeOffset.UtcNow), (string _, SessionState state) => state with
-			{
-				LastTurnAt = DateTimeOffset.UtcNow
-			});
-			AgentRespondResponse agentRespondResponse = await SendAgentRequestAsync(httpClientFactory, new AgentRespondRequest(sessionId, request.Text, request.Metadata), ct);
-			return ((object)agentRespondResponse == null) ? Results.Ok(new TurnTextResponse(sessionId, "抱歉，Agent 服务暂时不可用。", null, "gateway_fallback")) : Results.Ok(new TurnTextResponse(agentRespondResponse.SessionId, agentRespondResponse.ReplyText, agentRespondResponse.ToolCall, agentRespondResponse.Source));
-		}));
-		webApplication.Map("/turn/stream", async delegate(HttpContext context)
+					["input_type"] = hasAudio ? "audio_multipart" : "form_text",
+					["gateway_mode"] = "debug_bridge"
+				}
+			};
+
+			return await HandleTextTurnAsync(request, sessions, httpClientFactory, ct);
+		});
+
+		app.Map("/turn/stream", async context =>
 		{
 			if (!context.WebSockets.IsWebSocketRequest)
 			{
 				context.Response.StatusCode = 400;
-				await context.Response.WriteAsJsonAsync(new
-				{
-					error = "WebSocket request required"
-				});
+				await context.Response.WriteAsJsonAsync(new { error = "WebSocket request required" });
+				return;
 			}
-			else
-			{
-				await HandleWebSocketSessionAsync(await context.WebSockets.AcceptWebSocketAsync(), context.RequestServices.GetRequiredService<IHttpClientFactory>(), context.RequestAborted);
-			}
+
+			await HandleWebSocketSessionAsync(await context.WebSockets.AcceptWebSocketAsync(), context.RequestServices.GetRequiredService<IHttpClientFactory>(), context.RequestAborted);
 		});
-		webApplication.MapPost("/tool/call", (Func<ToolCallRequest, IHttpClientFactory, CancellationToken, Task<IResult>>)(async ([FromBody] ToolCallRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+
+		app.MapPost("/tool/call", async ([FromBody] ToolCallRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 		{
 			if (string.IsNullOrWhiteSpace(request.ToolName))
 			{
-				return Results.BadRequest(new
-				{
-					error = "tool_name is required"
-				});
+				return Results.BadRequest(new { error = "tool_name is required" });
 			}
+
 			HttpClient client = httpClientFactory.CreateClient("haBridge");
 			using HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/tools/call", request, ct);
 			string json = await resp.Content.ReadAsStringAsync(ct);
@@ -116,10 +141,127 @@ public class Program
 			{
 				return Results.StatusCode(502);
 			}
-			ToolCallResult value = JsonSerializer.Deserialize<ToolCallResult>(json, JsonOptions) ?? new ToolCallResult(Success: false, "Bridge returned invalid payload", null, null);
-			return Results.Ok(value);
-		}));
-		await webApplication.RunAsync();
+
+			ToolCallResult payload = JsonSerializer.Deserialize<ToolCallResult>(json, JsonOptions)
+				?? new ToolCallResult(false, "Bridge returned invalid payload", null, null);
+			return Results.Ok(payload);
+		});
+
+		app.MapPost("/v1/wake/claim", async ([FromBody] WakeClaimRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/claim", request, ct));
+
+		app.MapPost("/v1/wake/heartbeat", async ([FromBody] WakeHeartbeatRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/heartbeat", request, ct));
+
+		app.MapPost("/v1/wake/validate", async ([FromBody] WakeHeartbeatRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/validate", request, ct));
+
+		app.MapPost("/v1/wake/release", async ([FromBody] WakeReleaseRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/release", request, ct));
+
+		await app.RunAsync();
+	}
+
+	private static async Task<IResult> HandleTextTurnAsync(
+		TurnTextRequest request,
+		ConcurrentDictionary<string, SessionState> sessions,
+		IHttpClientFactory httpClientFactory,
+		CancellationToken ct)
+	{
+		if (string.IsNullOrWhiteSpace(request.Text))
+		{
+			return Results.BadRequest(new { error = "text is required" });
+		}
+
+		if (!string.IsNullOrWhiteSpace(request.WakeToken))
+		{
+			if (string.IsNullOrWhiteSpace(request.HomeId) || string.IsNullOrWhiteSpace(request.DeviceId))
+			{
+				return Results.BadRequest(new { error = "home_id and device_id are required when wake_token is provided" });
+			}
+
+			bool wakeValid = await ValidateWakeOwnershipAsync(httpClientFactory, request.HomeId, request.DeviceId, request.WakeToken, ct, refresh: true);
+			if (!wakeValid)
+			{
+				return Results.Conflict(new { error = "wake token invalid or claimed by another device" });
+			}
+		}
+
+		string sessionId = string.IsNullOrWhiteSpace(request.SessionId) ? Guid.NewGuid().ToString("N") : request.SessionId;
+		sessions.AddOrUpdate(
+			sessionId,
+			_ => new SessionState(sessionId, request.DeviceId, DateTimeOffset.UtcNow),
+			(_, state) => state with { LastTurnAt = DateTimeOffset.UtcNow });
+
+		Dictionary<string, string>? metadata = MergeMetadata(request.Metadata, request.HomeId, request.DeviceId, request.WakeToken);
+		AgentRespondResponse? agentResp = await SendAgentRequestAsync(httpClientFactory, new AgentRespondRequest(sessionId, request.Text, metadata), ct);
+		if (agentResp is null)
+		{
+			return Results.Ok(new TurnTextResponse(sessionId, "抱歉，Agent 服务暂时不可用。", null, "gateway_fallback"));
+		}
+
+		return Results.Ok(new TurnTextResponse(agentResp.SessionId, agentResp.ReplyText, agentResp.ToolCall, agentResp.Source));
+	}
+
+	private static Dictionary<string, string>? MergeMetadata(
+		Dictionary<string, string>? metadata,
+		string? homeId,
+		string? deviceId,
+		string? wakeToken)
+	{
+		Dictionary<string, string> merged = metadata is null
+			? new Dictionary<string, string>()
+			: new Dictionary<string, string>(metadata, StringComparer.OrdinalIgnoreCase);
+
+		if (!string.IsNullOrWhiteSpace(homeId))
+		{
+			merged["home_id"] = homeId;
+		}
+
+		if (!string.IsNullOrWhiteSpace(deviceId))
+		{
+			merged["device_id"] = deviceId;
+		}
+
+		if (!string.IsNullOrWhiteSpace(wakeToken))
+		{
+			merged["wake_token"] = wakeToken;
+		}
+
+		return merged.Count == 0 ? null : merged;
+	}
+
+	private static async Task<bool> ValidateWakeOwnershipAsync(
+		IHttpClientFactory httpClientFactory,
+		string homeId,
+		string deviceId,
+		string wakeToken,
+		CancellationToken ct,
+		bool refresh)
+	{
+		try
+		{
+			HttpClient client = httpClientFactory.CreateClient("wakeCoordinator");
+			WakeHeartbeatRequest payload = new()
+			{
+				HomeId = homeId,
+				DeviceId = deviceId,
+				WakeToken = wakeToken
+			};
+			string path = refresh ? "/v1/wake/heartbeat" : "/v1/wake/validate";
+			using HttpResponseMessage response = await client.PostAsJsonAsync(path, payload, ct);
+			if (!response.IsSuccessStatusCode)
+			{
+				return false;
+			}
+
+			WakeValidateResponse? body = await response.Content.ReadFromJsonAsync<WakeValidateResponse>(ct);
+			return body?.Valid == true;
+		}
+		catch
+		{
+			return false;
+		}
 	}
 
 	private static async Task HandleWebSocketSessionAsync(WebSocket socket, IHttpClientFactory httpClientFactory, CancellationToken ct)
@@ -127,25 +269,24 @@ public class Program
 		byte[] buffer = new byte[8192];
 		while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
 		{
-			WebSocketReceiveResult webSocketReceiveResult = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-			if (webSocketReceiveResult.MessageType == WebSocketMessageType.Close)
+			WebSocketReceiveResult receive = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+			if (receive.MessageType == WebSocketMessageType.Close)
 			{
 				await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closed", ct);
 				break;
 			}
-			string json = Encoding.UTF8.GetString(buffer, 0, webSocketReceiveResult.Count);
-			TurnStreamMessage turnStreamMessage = JsonSerializer.Deserialize<TurnStreamMessage>(json, JsonOptions);
-			if ((object)turnStreamMessage == null || string.IsNullOrWhiteSpace(turnStreamMessage.Text))
+
+			string json = Encoding.UTF8.GetString(buffer, 0, receive.Count);
+			TurnStreamMessage? message = JsonSerializer.Deserialize<TurnStreamMessage>(json, JsonOptions);
+			if (message is null || string.IsNullOrWhiteSpace(message.Text))
 			{
-				await SendWebSocketJsonAsync(socket, new
-				{
-					error = "invalid message"
-				}, ct);
+				await SendWebSocketJsonAsync(socket, new { error = "invalid message" }, ct);
 				continue;
 			}
-			string sessionId = (string.IsNullOrWhiteSpace(turnStreamMessage.SessionId) ? Guid.NewGuid().ToString("N") : turnStreamMessage.SessionId);
-			AgentRespondResponse agentRespondResponse = await SendAgentRequestAsync(httpClientFactory, new AgentRespondRequest(sessionId, turnStreamMessage.Text, turnStreamMessage.Metadata), ct);
-			if ((object)agentRespondResponse == null)
+
+			string sessionId = string.IsNullOrWhiteSpace(message.SessionId) ? Guid.NewGuid().ToString("N") : message.SessionId;
+			AgentRespondResponse? response = await SendAgentRequestAsync(httpClientFactory, new AgentRespondRequest(sessionId, message.Text, message.Metadata), ct);
+			if (response is null)
 			{
 				await SendWebSocketJsonAsync(socket, new
 				{
@@ -158,10 +299,10 @@ public class Program
 			{
 				await SendWebSocketJsonAsync(socket, new
 				{
-					session_id = agentRespondResponse.SessionId,
-					reply_text = agentRespondResponse.ReplyText,
-					source = agentRespondResponse.Source,
-					tool_call = agentRespondResponse.ToolCall
+					session_id = response.SessionId,
+					reply_text = response.ReplyText,
+					source = response.Source,
+					tool_call = response.ToolCall
 				}, ct);
 			}
 		}
@@ -169,16 +310,15 @@ public class Program
 
 	private static async Task<AgentRespondResponse?> SendAgentRequestAsync(IHttpClientFactory httpClientFactory, AgentRespondRequest request, CancellationToken ct)
 	{
-		_ = 1;
 		try
 		{
 			HttpClient client = httpClientFactory.CreateClient("agent");
-			using HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/agent/respond", request, ct);
-			if (!resp.IsSuccessStatusCode)
+			using HttpResponseMessage response = await client.PostAsJsonAsync("/v1/agent/respond", request, ct);
+			if (!response.IsSuccessStatusCode)
 			{
 				return null;
 			}
-			return await resp.Content.ReadFromJsonAsync<AgentRespondResponse>(ct);
+			return await response.Content.ReadFromJsonAsync<AgentRespondResponse>(ct);
 		}
 		catch
 		{
@@ -186,19 +326,67 @@ public class Program
 		}
 	}
 
+	private static async Task<IResult> ForwardGetAsync(IHttpClientFactory httpClientFactory, string clientName, string path, CancellationToken ct)
+	{
+		try
+		{
+			HttpClient client = httpClientFactory.CreateClient(clientName);
+			using HttpResponseMessage response = await client.GetAsync(path, ct);
+			string payload = await response.Content.ReadAsStringAsync(ct);
+			if (!response.IsSuccessStatusCode)
+			{
+				return Results.StatusCode((int)response.StatusCode);
+			}
+			return Results.Text(string.IsNullOrWhiteSpace(payload) ? "{}" : payload, "application/json");
+		}
+		catch
+		{
+			return Results.StatusCode(502);
+		}
+	}
+
+	private static async Task<IResult> ForwardJsonPostAsync<T>(
+		IHttpClientFactory httpClientFactory,
+		string clientName,
+		string path,
+		T payload,
+		CancellationToken ct,
+		HttpMethod? method = null)
+	{
+		try
+		{
+			HttpClient client = httpClientFactory.CreateClient(clientName);
+			using HttpRequestMessage req = new(method ?? HttpMethod.Post, path)
+			{
+				Content = JsonContent.Create(payload)
+			};
+			using HttpResponseMessage response = await client.SendAsync(req, ct);
+			string body = await response.Content.ReadAsStringAsync(ct);
+			if (!response.IsSuccessStatusCode)
+			{
+				return Results.StatusCode((int)response.StatusCode);
+			}
+			return Results.Text(string.IsNullOrWhiteSpace(body) ? "{}" : body, "application/json");
+		}
+		catch
+		{
+			return Results.StatusCode(502);
+		}
+	}
+
 	private static async Task SendWebSocketJsonAsync(WebSocket socket, object payload, CancellationToken ct)
 	{
-		string s = JsonSerializer.Serialize(payload, JsonOptions);
-		byte[] bytes = Encoding.UTF8.GetBytes(s);
-		await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, endOfMessage: true, ct);
+		string json = JsonSerializer.Serialize(payload, JsonOptions);
+		byte[] bytes = Encoding.UTF8.GetBytes(json);
+		await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
 	}
 
 	private static async Task<bool> ProbeAsync(HttpClient client, CancellationToken ct)
 	{
 		try
 		{
-			using HttpResponseMessage httpResponseMessage = await client.GetAsync("/health", ct);
-			return httpResponseMessage.IsSuccessStatusCode;
+			using HttpResponseMessage response = await client.GetAsync("/health", ct);
+			return response.IsSuccessStatusCode;
 		}
 		catch
 		{

@@ -1,0 +1,254 @@
+﻿openapi: 3.0.3
+info:
+  title: Smart Assistant Gateway API
+  version: 0.2.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Gateway health
+      responses:
+        '200':
+          description: OK
+
+  /session/start:
+    post:
+      summary: Start a new session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_id:
+                  type: string
+                user_id:
+                  type: string
+      responses:
+        '200':
+          description: Session created
+
+  /turn/text:
+    post:
+      summary: Text turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TurnTextRequest'
+      responses:
+        '200':
+          description: Turn reply
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnTextResponse'
+
+  /api/assistant/text-turn:
+    post:
+      summary: Android compatibility text turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TurnTextRequest'
+      responses:
+        '200':
+          description: Turn reply
+
+  /api/assistant/turn:
+    post:
+      summary: Android compatibility audio turn (debug bridge)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                audio:
+                  type: string
+                  format: binary
+                session_id:
+                  type: string
+                device_id:
+                  type: string
+                home_id:
+                  type: string
+                wake_token:
+                  type: string
+                text:
+                  type: string
+      responses:
+        '200':
+          description: Turn reply
+
+  /tool/call:
+    post:
+      summary: Proxy tool call to HA bridge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToolCallRequest'
+      responses:
+        '200':
+          description: Tool execution result
+
+  /v1/wake/claim:
+    post:
+      summary: Claim wake ownership for a home
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WakeClaimRequest'
+      responses:
+        '200':
+          description: Claim result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WakeClaimResponse'
+
+  /v1/wake/heartbeat:
+    post:
+      summary: Refresh wake ownership token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WakeTokenRequest'
+      responses:
+        '200':
+          description: Validation result
+
+  /v1/wake/validate:
+    post:
+      summary: Validate wake ownership token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WakeTokenRequest'
+      responses:
+        '200':
+          description: Validation result
+
+  /v1/wake/release:
+    post:
+      summary: Release wake ownership token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WakeTokenRequest'
+      responses:
+        '200':
+          description: Release result
+
+components:
+  schemas:
+    TurnTextRequest:
+      type: object
+      required: [text]
+      properties:
+        session_id:
+          type: string
+        device_id:
+          type: string
+        home_id:
+          type: string
+        wake_token:
+          type: string
+        text:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    TurnTextResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        reply_text:
+          type: string
+        source:
+          type: string
+        tool_call:
+          $ref: '#/components/schemas/ToolCall'
+
+    ToolCall:
+      type: object
+      properties:
+        tool_name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+
+    ToolCallRequest:
+      type: object
+      required: [tool_name]
+      properties:
+        tool_name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+        trace_id:
+          type: string
+
+    WakeClaimRequest:
+      type: object
+      required: [home_id, device_id]
+      properties:
+        home_id:
+          type: string
+        device_id:
+          type: string
+        wake_id:
+          type: string
+        confidence:
+          type: number
+
+    WakeClaimResponse:
+      type: object
+      properties:
+        granted:
+          type: boolean
+        home_id:
+          type: string
+        device_id:
+          type: string
+        wake_token:
+          type: string
+        owner_device_id:
+          type: string
+        wake_id:
+          type: string
+        reason:
+          type: string
+        expires_in_ms:
+          type: integer
+
+    WakeTokenRequest:
+      type: object
+      required: [home_id, device_id, wake_token]
+      properties:
+        home_id:
+          type: string
+        device_id:
+          type: string
+        wake_token:
+          type: string
