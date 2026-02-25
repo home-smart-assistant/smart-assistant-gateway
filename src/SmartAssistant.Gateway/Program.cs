@@ -38,11 +38,8 @@ public class Program
 			string uriString = builder.Configuration["Services:HomeAssistantBridgeBaseUrl"] ?? "http://localhost:8092";
 			client.BaseAddress = new Uri(uriString);
 		});
-		builder.Services.AddHttpClient("wakeCoordinator", client =>
-		{
-			string uriString = builder.Configuration["Services:WakeCoordinatorBaseUrl"] ?? "http://localhost:8093";
-			client.BaseAddress = new Uri(uriString);
-		});
+		int wakeLockTtlMs = ParseWakeLockTtl(builder.Configuration["WakeArbitration:LockTtlMs"]);
+		WakeArbitrationService wakeArbitration = new(wakeLockTtlMs);
 
 		WebApplication app = builder.Build();
 		app.UseSwagger();
@@ -55,7 +52,7 @@ public class Program
 		{
 			bool agentAlive = await ProbeAsync(httpClientFactory.CreateClient("agent"), ct);
 			bool haAlive = await ProbeAsync(httpClientFactory.CreateClient("haBridge"), ct);
-			bool wakeCoordinatorAlive = await ProbeAsync(httpClientFactory.CreateClient("wakeCoordinator"), ct);
+			WakeArbitrationHealthSnapshot wakeHealth = wakeArbitration.GetHealthSnapshot();
 
 			return Results.Ok(new
 			{
@@ -65,7 +62,13 @@ public class Program
 				{
 					agent = agentAlive ? "ok" : "degraded",
 					haBridge = haAlive ? "ok" : "degraded",
-					wakeCoordinator = wakeCoordinatorAlive ? "ok" : "degraded"
+					wakeCoordinator = "ok"
+				},
+				wake_arbitration = new
+				{
+					mode = wakeHealth.Backend,
+					lock_ttl_ms = wakeHealth.LockTtlMs,
+					active_locks = wakeHealth.ActiveLocks
 				},
 				time = DateTimeOffset.UtcNow
 			});
@@ -80,10 +83,10 @@ public class Program
 		});
 
 		app.MapPost("/turn/text", async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await HandleTextTurnAsync(request, sessions, httpClientFactory, ct));
+			await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct));
 
 		app.MapPost("/api/assistant/text-turn", async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await HandleTextTurnAsync(request, sessions, httpClientFactory, ct));
+			await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct));
 
 		app.MapPost("/api/assistant/turn", async (HttpContext context, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 		{
@@ -112,7 +115,7 @@ public class Program
 				}
 			};
 
-			return await HandleTextTurnAsync(request, sessions, httpClientFactory, ct);
+			return await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct);
 		});
 
 		app.Map("/turn/stream", async context =>
@@ -143,21 +146,27 @@ public class Program
 			}
 
 			ToolCallResult payload = JsonSerializer.Deserialize<ToolCallResult>(json, JsonOptions)
-				?? new ToolCallResult(false, "Bridge returned invalid payload", null, null);
+				?? new ToolCallResult
+				{
+					Success = false,
+					Message = "Bridge returned invalid payload",
+					Data = null,
+					TraceId = null
+				};
 			return Results.Ok(payload);
 		});
 
-		app.MapPost("/v1/wake/claim", async ([FromBody] WakeClaimRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/claim", request, ct));
+		app.MapPost("/v1/wake/claim", ([FromBody] WakeClaimRequest request) =>
+			Results.Ok(wakeArbitration.Claim(request)));
 
-		app.MapPost("/v1/wake/heartbeat", async ([FromBody] WakeHeartbeatRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/heartbeat", request, ct));
+		app.MapPost("/v1/wake/heartbeat", ([FromBody] WakeHeartbeatRequest request) =>
+			Results.Ok(wakeArbitration.Validate(request.HomeId, request.DeviceId, request.WakeToken, refresh: true)));
 
-		app.MapPost("/v1/wake/validate", async ([FromBody] WakeHeartbeatRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/validate", request, ct));
+		app.MapPost("/v1/wake/validate", ([FromBody] WakeHeartbeatRequest request) =>
+			Results.Ok(wakeArbitration.Validate(request.HomeId, request.DeviceId, request.WakeToken, refresh: false)));
 
-		app.MapPost("/v1/wake/release", async ([FromBody] WakeReleaseRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await ForwardJsonPostAsync(httpClientFactory, "wakeCoordinator", "/v1/wake/release", request, ct));
+		app.MapPost("/v1/wake/release", ([FromBody] WakeReleaseRequest request) =>
+			Results.Ok(wakeArbitration.Release(request)));
 
 		await app.RunAsync();
 	}
@@ -166,6 +175,7 @@ public class Program
 		TurnTextRequest request,
 		ConcurrentDictionary<string, SessionState> sessions,
 		IHttpClientFactory httpClientFactory,
+		WakeArbitrationService wakeArbitration,
 		CancellationToken ct)
 	{
 		if (string.IsNullOrWhiteSpace(request.Text))
@@ -180,7 +190,7 @@ public class Program
 				return Results.BadRequest(new { error = "home_id and device_id are required when wake_token is provided" });
 			}
 
-			bool wakeValid = await ValidateWakeOwnershipAsync(httpClientFactory, request.HomeId, request.DeviceId, request.WakeToken, ct, refresh: true);
+			bool wakeValid = ValidateWakeOwnership(wakeArbitration, request.HomeId, request.DeviceId, request.WakeToken, refresh: true);
 			if (!wakeValid)
 			{
 				return Results.Conflict(new { error = "wake token invalid or claimed by another device" });
@@ -231,37 +241,15 @@ public class Program
 		return merged.Count == 0 ? null : merged;
 	}
 
-	private static async Task<bool> ValidateWakeOwnershipAsync(
-		IHttpClientFactory httpClientFactory,
+	private static bool ValidateWakeOwnership(
+		WakeArbitrationService wakeArbitration,
 		string homeId,
 		string deviceId,
 		string wakeToken,
-		CancellationToken ct,
 		bool refresh)
 	{
-		try
-		{
-			HttpClient client = httpClientFactory.CreateClient("wakeCoordinator");
-			WakeHeartbeatRequest payload = new()
-			{
-				HomeId = homeId,
-				DeviceId = deviceId,
-				WakeToken = wakeToken
-			};
-			string path = refresh ? "/v1/wake/heartbeat" : "/v1/wake/validate";
-			using HttpResponseMessage response = await client.PostAsJsonAsync(path, payload, ct);
-			if (!response.IsSuccessStatusCode)
-			{
-				return false;
-			}
-
-			WakeValidateResponse? body = await response.Content.ReadFromJsonAsync<WakeValidateResponse>(ct);
-			return body?.Valid == true;
-		}
-		catch
-		{
-			return false;
-		}
+		WakeValidateResponse response = wakeArbitration.Validate(homeId, deviceId, wakeToken, refresh);
+		return response.Valid;
 	}
 
 	private static async Task HandleWebSocketSessionAsync(WebSocket socket, IHttpClientFactory httpClientFactory, CancellationToken ct)
@@ -326,52 +314,13 @@ public class Program
 		}
 	}
 
-	private static async Task<IResult> ForwardGetAsync(IHttpClientFactory httpClientFactory, string clientName, string path, CancellationToken ct)
+	private static int ParseWakeLockTtl(string? raw)
 	{
-		try
+		if (!int.TryParse(raw, out int parsed))
 		{
-			HttpClient client = httpClientFactory.CreateClient(clientName);
-			using HttpResponseMessage response = await client.GetAsync(path, ct);
-			string payload = await response.Content.ReadAsStringAsync(ct);
-			if (!response.IsSuccessStatusCode)
-			{
-				return Results.StatusCode((int)response.StatusCode);
-			}
-			return Results.Text(string.IsNullOrWhiteSpace(payload) ? "{}" : payload, "application/json");
+			return 8000;
 		}
-		catch
-		{
-			return Results.StatusCode(502);
-		}
-	}
-
-	private static async Task<IResult> ForwardJsonPostAsync<T>(
-		IHttpClientFactory httpClientFactory,
-		string clientName,
-		string path,
-		T payload,
-		CancellationToken ct,
-		HttpMethod? method = null)
-	{
-		try
-		{
-			HttpClient client = httpClientFactory.CreateClient(clientName);
-			using HttpRequestMessage req = new(method ?? HttpMethod.Post, path)
-			{
-				Content = JsonContent.Create(payload)
-			};
-			using HttpResponseMessage response = await client.SendAsync(req, ct);
-			string body = await response.Content.ReadAsStringAsync(ct);
-			if (!response.IsSuccessStatusCode)
-			{
-				return Results.StatusCode((int)response.StatusCode);
-			}
-			return Results.Text(string.IsNullOrWhiteSpace(body) ? "{}" : body, "application/json");
-		}
-		catch
-		{
-			return Results.StatusCode(502);
-		}
+		return Math.Clamp(parsed, 1000, 120000);
 	}
 
 	private static async Task SendWebSocketJsonAsync(WebSocket socket, object payload, CancellationToken ct)

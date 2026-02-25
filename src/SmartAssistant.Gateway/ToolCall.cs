@@ -1,5 +1,13 @@
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace SmartAssistant.Gateway;
 
-public record ToolCall(string ToolName, Dictionary<string, object>? Arguments);
+public sealed class ToolCall
+{
+	[JsonPropertyName("tool_name")]
+	public string ToolName { get; init; } = string.Empty;
+
+	[JsonPropertyName("arguments")]
+	public Dictionary<string, object>? Arguments { get; init; }
+}

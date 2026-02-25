@@ -7,13 +7,12 @@
       ASPNETCORE_URLS: http://+:8080
       Services__AgentBaseUrl: http://smart_assistant_agent:8091
       Services__HomeAssistantBridgeBaseUrl: http://smart_assistant_ha_bridge:8092
-      Services__WakeCoordinatorBaseUrl: http://smart_assistant_wake_coordinator:8093
+      WakeArbitration__LockTtlMs: ${WAKE_LOCK_TTL_MS:-8000}
     ports:
       - "8080:8080"
     depends_on:
       - smart_assistant_agent
       - smart_assistant_ha_bridge
-      - smart_assistant_wake_coordinator
 
   smart_assistant_agent:
     build:
@@ -40,20 +39,14 @@
       HA_ENABLED: ${HA_ENABLED:-false}
       HA_BASE_URL: ${HA_BASE_URL}
       HA_TOKEN: ${HA_TOKEN}
+      HA_LIGHT_LIVING_ROOM_ENTITY_ID: ${HA_LIGHT_LIVING_ROOM_ENTITY_ID}
+      HA_LIGHT_BEDROOM_ENTITY_ID: ${HA_LIGHT_BEDROOM_ENTITY_ID}
+      HA_LIGHT_STUDY_ENTITY_ID: ${HA_LIGHT_STUDY_ENTITY_ID}
+      HA_CLIMATE_LIVING_ROOM_ENTITY_ID: ${HA_CLIMATE_LIVING_ROOM_ENTITY_ID}
+      HA_CLIMATE_BEDROOM_ENTITY_ID: ${HA_CLIMATE_BEDROOM_ENTITY_ID}
+      HA_CLIMATE_STUDY_ENTITY_ID: ${HA_CLIMATE_STUDY_ENTITY_ID}
     ports:
       - "8092:8092"
-
-  smart_assistant_wake_coordinator:
-    build:
-      context: ../../smart_assistant_wake_coordinator
-      dockerfile: Dockerfile
-    environment:
-      WAKE_LOCK_TTL_MS: ${WAKE_LOCK_TTL_MS:-8000}
-      REDIS_URL: redis://redis:6379/1
-    ports:
-      - "8093:8093"
-    depends_on:
-      - redis
 
   redis:
     image: redis:7-alpine

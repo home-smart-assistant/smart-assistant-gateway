@@ -3,7 +3,7 @@
 `smart_assistant_gateway/deploy/` 目录部署编排（Docker Compose）。
 
 ## 目标
-- 一台机器拉起首版后端：Gateway + Agent + HA Bridge + Wake Coordinator + Redis + PostgreSQL
+- 一台机器拉起首版后端：Gateway + Agent + HA Bridge + Redis + PostgreSQL
 - 支持 Android 面板直接接入 `Gateway:8080`
 
 ## 目录
@@ -23,7 +23,6 @@ docker compose up -d --build
 - `8080` Gateway
 - `8091` Agent
 - `8092` HA Bridge
-- `8093` Wake Coordinator
 - `6379` Redis
 - `5432` PostgreSQL
 
