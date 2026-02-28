@@ -9,5 +9,5 @@ public sealed class ToolCall
 	public string ToolName { get; init; } = string.Empty;
 
 	[JsonPropertyName("arguments")]
-	public Dictionary<string, object>? Arguments { get; init; }
+	public Dictionary<string, object?>? Arguments { get; init; }
 }

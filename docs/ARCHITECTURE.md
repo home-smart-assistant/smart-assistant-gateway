@@ -1,23 +1,25 @@
 # smart_assistant_gateway 架构说明
 
-## 技术栈
-- .NET 8
-- ASP.NET Core Minimal API
-- `HttpClientFactory`（调用 Agent / HA Bridge）
-- Swagger / OpenAPI
-- WebSocket（文本流式会话）
-
-## 架构定位
-- Android 客户端统一入口
-- 编排 Agent 与 HA Bridge 两个下游服务
-- 内置多设备唤醒仲裁（`WakeArbitrationService`）
+## 核心组件
+- API 网关：统一接收文本/语音调试请求
+- 下游路由：Agent（对话与规划）、HA Bridge（工具执行）
+- 唤醒仲裁：`WakeArbitrationService`（多设备 claim/heartbeat/release）
+- WebSocket 流式会话：`/turn/stream`
 
 ## 请求链路
-- 文本对话：`/turn/text` 或 `/api/assistant/text-turn` -> Agent `/v1/agent/respond`
-- Android 对话：`/api/assistant/turn`（multipart，当前用于网关调试桥接）
-- 工具调用：`/tool/call` -> HA Bridge `/v1/tools/call`
-- 唤醒仲裁：`/v1/wake/*` -> Gateway 内部仲裁服务
-- 健康检查：`/health` 聚合下游连通性与仲裁状态
+1. 文本对话：`/turn/text` 或 `/api/assistant/text-turn` -> Agent `/v1/agent/respond`
+2. Android multipart 调试：`/api/assistant/turn` -> 转换为文本请求 -> Agent
+3. 工具调用：`/tool/call` -> HA Bridge `/v1/tools/call`
+4. 唤醒仲裁：`/v1/wake/*` -> Gateway 内部服务
+
+## 编码与转码
+- 统一 UTF-8 源码与文档。
+- 在 Gateway 入站和下游转发前进行文本规范化（支持常见 mojibake 修复）。
+- 无法可靠修复时拒绝请求，返回：
+  - `error_code=invalid_text_encoding`
+  - `field`
+  - `sample`
+- 该行为由 `TextEncoding:Strict`（或 `TextEncoding__Strict`）控制，默认 `true`。
 
 ## 主要接口
 - `GET /health`
@@ -31,29 +33,3 @@
 - `POST /v1/wake/heartbeat`
 - `POST /v1/wake/validate`
 - `POST /v1/wake/release`
-
-完整契约见 `docs/openapi/gateway.openapi.yaml`。
-
-## 关键配置
-配置文件：`src/SmartAssistant.Gateway/appsettings.json`
-
-- `Services:AgentBaseUrl`，默认 `http://localhost:8091`
-- `Services:HomeAssistantBridgeBaseUrl`，默认 `http://localhost:8092`
-- `WakeArbitration:LockTtlMs`，默认 `8000`
-
-环境变量覆盖：
-- `Services__AgentBaseUrl`
-- `Services__HomeAssistantBridgeBaseUrl`
-- `WakeArbitration__LockTtlMs`
-
-监听地址配置：
-- 启动参数可指定 `--urls http://0.0.0.0:8080`
-- 也可在 `src/SmartAssistant.Gateway/Properties/launchSettings.json` 配置
-
-## 本地运行
-```powershell
-dotnet run --project src/SmartAssistant.Gateway/SmartAssistant.Gateway.csproj --urls http://0.0.0.0:8080
-```
-
-验证：
-- `GET http://<gateway-ip>:8080/health`

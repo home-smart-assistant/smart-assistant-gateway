@@ -38,6 +38,7 @@ public class Program
 			string uriString = builder.Configuration["Services:HomeAssistantBridgeBaseUrl"] ?? "http://localhost:8092";
 			client.BaseAddress = new Uri(uriString);
 		});
+		bool textEncodingStrict = ParseTextEncodingStrict(builder.Configuration["TextEncoding:Strict"]);
 		int wakeLockTtlMs = ParseWakeLockTtl(builder.Configuration["WakeArbitration:LockTtlMs"]);
 		WakeArbitrationService wakeArbitration = new(wakeLockTtlMs);
 
@@ -83,10 +84,30 @@ public class Program
 		});
 
 		app.MapPost("/turn/text", async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct));
+		{
+			try
+			{
+				request = NormalizeTurnTextRequest(request, textEncodingStrict);
+			}
+			catch (EncodingNormalizationException ex)
+			{
+				return InvalidEncodingResult(ex);
+			}
+			return await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct);
+		});
 
 		app.MapPost("/api/assistant/text-turn", async ([FromBody] TurnTextRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
-			await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct));
+		{
+			try
+			{
+				request = NormalizeTurnTextRequest(request, textEncodingStrict);
+			}
+			catch (EncodingNormalizationException ex)
+			{
+				return InvalidEncodingResult(ex);
+			}
+			return await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct);
+		});
 
 		app.MapPost("/api/assistant/turn", async (HttpContext context, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 		{
@@ -115,6 +136,15 @@ public class Program
 				}
 			};
 
+			try
+			{
+				request = NormalizeTurnTextRequest(request, textEncodingStrict);
+			}
+			catch (EncodingNormalizationException ex)
+			{
+				return InvalidEncodingResult(ex);
+			}
+
 			return await HandleTextTurnAsync(request, sessions, httpClientFactory, wakeArbitration, ct);
 		});
 
@@ -127,7 +157,12 @@ public class Program
 				return;
 			}
 
-			await HandleWebSocketSessionAsync(await context.WebSockets.AcceptWebSocketAsync(), context.RequestServices.GetRequiredService<IHttpClientFactory>(), context.RequestAborted);
+			await HandleWebSocketSessionAsync(
+				await context.WebSockets.AcceptWebSocketAsync(),
+				context.RequestServices.GetRequiredService<IHttpClientFactory>(),
+				textEncodingStrict,
+				context.RequestAborted
+			);
 		});
 
 		app.MapPost("/tool/call", async ([FromBody] ToolCallRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
@@ -135,6 +170,15 @@ public class Program
 			if (string.IsNullOrWhiteSpace(request.ToolName))
 			{
 				return Results.BadRequest(new { error = "tool_name is required" });
+			}
+
+			try
+			{
+				request = NormalizeToolCallRequest(request, textEncodingStrict);
+			}
+			catch (EncodingNormalizationException ex)
+			{
+				return InvalidEncodingResult(ex);
 			}
 
 			HttpClient client = httpClientFactory.CreateClient("haBridge");
@@ -241,6 +285,55 @@ public class Program
 		return merged.Count == 0 ? null : merged;
 	}
 
+	private static TurnTextRequest NormalizeTurnTextRequest(TurnTextRequest request, bool strict)
+	{
+		string normalizedText = TextNormalizer.NormalizeText(request.Text ?? string.Empty, "text", strict);
+		string? normalizedHomeId = request.HomeId is null ? null : TextNormalizer.NormalizeText(request.HomeId, "home_id", strict);
+		string? normalizedDeviceId = request.DeviceId is null ? null : TextNormalizer.NormalizeText(request.DeviceId, "device_id", strict);
+		string? normalizedWakeToken = request.WakeToken is null ? null : TextNormalizer.NormalizeText(request.WakeToken, "wake_token", strict);
+		Dictionary<string, string>? normalizedMetadata = TextNormalizer.NormalizeStringDictionary(request.Metadata, "metadata", strict);
+		return new TurnTextRequest
+		{
+			SessionId = request.SessionId,
+			Text = normalizedText,
+			HomeId = normalizedHomeId,
+			DeviceId = normalizedDeviceId,
+			WakeToken = normalizedWakeToken,
+			Metadata = normalizedMetadata,
+		};
+	}
+
+	private static TurnStreamMessage NormalizeTurnStreamMessage(TurnStreamMessage message, bool strict)
+	{
+		string normalizedText = TextNormalizer.NormalizeText(message.Text ?? string.Empty, "text", strict);
+		Dictionary<string, string>? normalizedMetadata = TextNormalizer.NormalizeStringDictionary(message.Metadata, "metadata", strict);
+		return new TurnStreamMessage(message.SessionId, normalizedText, normalizedMetadata);
+	}
+
+	private static ToolCallRequest NormalizeToolCallRequest(ToolCallRequest request, bool strict)
+	{
+		string normalizedToolName = TextNormalizer.NormalizeText(request.ToolName ?? string.Empty, "tool_name", strict);
+		Dictionary<string, object?>? normalizedArguments = TextNormalizer.NormalizeObjectDictionary(request.Arguments, "arguments", strict);
+		string? normalizedTraceId = request.TraceId is null ? null : TextNormalizer.NormalizeText(request.TraceId, "trace_id", strict);
+		return new ToolCallRequest
+		{
+			ToolName = normalizedToolName,
+			Arguments = normalizedArguments,
+			TraceId = normalizedTraceId,
+		};
+	}
+
+	private static IResult InvalidEncodingResult(EncodingNormalizationException ex)
+	{
+		return Results.BadRequest(new
+		{
+			error_code = "invalid_text_encoding",
+			field = ex.FieldPath,
+			sample = ex.Sample,
+			error = ex.Message,
+		});
+	}
+
 	private static bool ValidateWakeOwnership(
 		WakeArbitrationService wakeArbitration,
 		string homeId,
@@ -252,7 +345,11 @@ public class Program
 		return response.Valid;
 	}
 
-	private static async Task HandleWebSocketSessionAsync(WebSocket socket, IHttpClientFactory httpClientFactory, CancellationToken ct)
+	private static async Task HandleWebSocketSessionAsync(
+		WebSocket socket,
+		IHttpClientFactory httpClientFactory,
+		bool textEncodingStrict,
+		CancellationToken ct)
 	{
 		byte[] buffer = new byte[8192];
 		while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
@@ -269,6 +366,25 @@ public class Program
 			if (message is null || string.IsNullOrWhiteSpace(message.Text))
 			{
 				await SendWebSocketJsonAsync(socket, new { error = "invalid message" }, ct);
+				continue;
+			}
+			try
+			{
+				message = NormalizeTurnStreamMessage(message, textEncodingStrict);
+			}
+			catch (EncodingNormalizationException ex)
+			{
+				await SendWebSocketJsonAsync(
+					socket,
+					new
+					{
+						error_code = "invalid_text_encoding",
+						field = ex.FieldPath,
+						sample = ex.Sample,
+						error = ex.Message,
+					},
+					ct
+				);
 				continue;
 			}
 
@@ -321,6 +437,25 @@ public class Program
 			return 8000;
 		}
 		return Math.Clamp(parsed, 1000, 120000);
+	}
+
+	private static bool ParseTextEncodingStrict(string? raw)
+	{
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return true;
+		}
+		if (bool.TryParse(raw, out bool parsed))
+		{
+			return parsed;
+		}
+		string normalized = raw.Trim().ToLowerInvariant();
+		return normalized switch
+		{
+			"1" or "yes" or "y" or "on" => true,
+			"0" or "no" or "n" or "off" => false,
+			_ => true,
+		};
 	}
 
 	private static async Task SendWebSocketJsonAsync(WebSocket socket, object payload, CancellationToken ct)
