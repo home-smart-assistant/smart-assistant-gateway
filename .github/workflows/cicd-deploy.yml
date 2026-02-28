@@ -19,14 +19,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Build
-        run: dotnet build src/SmartAssistant.Gateway/SmartAssistant.Gateway.csproj --configuration Release
-
       - name: Login to GHCR
         shell: pwsh
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
