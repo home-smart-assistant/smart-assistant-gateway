@@ -39,3 +39,24 @@ dotnet run --project src/SmartAssistant.Gateway/SmartAssistant.Gateway.csproj --
 ## 接口文档
 - OpenAPI：`docs/openapi/gateway.openapi.yaml`
 - 架构说明：`docs/ARCHITECTURE.md`
+
+## CI/CD (Deploy to 192.168.3.103)
+- Workflow: `.github/workflows/cicd-deploy.yml`
+- Trigger: push to `main` or manual `workflow_dispatch`
+- Output image:
+  - `ghcr.io/home-smart-assistant/smart-assistant-gateway:main`
+  - `ghcr.io/home-smart-assistant/smart-assistant-gateway:<commit_sha>`
+- Deploy target service: `smart_assistant_gateway` in `/opt/smart-assistant/docker-compose.yml`
+
+Production compose source:
+- `deploy/prod/docker-compose.yml`
+- `deploy/prod/.env.example`
+- `deploy/prod/README.md`
+
+Runner labels:
+- Build: `[self-hosted, Windows, X64, builder-win]` (recommended on `192.168.3.11`)
+- Deploy: `[self-hosted, Linux, X64, deploy-linux]` (recommended on `192.168.3.103`)
+
+Optional config:
+- Repository variable `DEPLOY_PATH` (default `/opt/smart-assistant`)
+- `GHCR_USERNAME` + `GHCR_TOKEN` only if your package policy requires explicit login
