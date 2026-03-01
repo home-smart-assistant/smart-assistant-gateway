@@ -8,11 +8,11 @@ This directory is the production deployment source of truth for:
 
 ## Topology
 
-- Build server: `192.168.3.11` (Windows, self-hosted runner label: `builder-win`)
+- Build server: `192.168.3.11` (WSL2 Ubuntu on Windows, self-hosted runner label: `builder-linux-11`)
 - Deploy server: `192.168.3.103` (Linux, self-hosted runner label: `deploy-linux`)
 
 Each CI/CD workflow:
-1. builds/tests/pushes image on `builder-win`
+1. builds/tests/pushes image on `builder-linux-11`
 2. pulls and restarts only its own service on `deploy-linux`
 
 ## Deploy server layout (192.168.3.103)
@@ -47,8 +47,9 @@ Secrets:
 
 On `192.168.3.11` (Windows builder):
 
-- register self-hosted runner with label `builder-win`
-- install Docker and ensure Linux container build works
+- install WSL2 + Ubuntu
+- register self-hosted runner inside Ubuntu with label `builder-linux-11`
+- install Docker inside Ubuntu and ensure Linux image build/push works
 - install Python 3.11 (agent/bridge tests)
 - install .NET 8 SDK (gateway build)
 

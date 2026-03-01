@@ -54,7 +54,7 @@ Production compose source:
 - `deploy/prod/README.md`
 
 Runner labels:
-- Build: `[self-hosted, Windows, X64, builder-win]` (recommended on `192.168.3.11`)
+- Build: `[self-hosted, Linux, X64, builder-linux-11]` (recommended on `192.168.3.11` via WSL2 Ubuntu runner)
 - Deploy: `[self-hosted, Linux, X64, deploy-linux]` (recommended on `192.168.3.103`)
 
 Optional config:
