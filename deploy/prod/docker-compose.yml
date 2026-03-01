@@ -26,6 +26,8 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-deepseek-r1:7b}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      AGENT_USE_LLM_INTENT_ROUTER: ${AGENT_USE_LLM_INTENT_ROUTER:-true}
+      AGENT_USE_LLM_TOOL_ROUTER: ${AGENT_USE_LLM_TOOL_ROUTER:-true}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
