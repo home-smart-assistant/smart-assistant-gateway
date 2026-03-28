@@ -12,7 +12,7 @@ This directory is the production deployment source of truth for:
 - Deploy server: `192.168.3.103` (Linux, self-hosted runner label: `deploy-linux`)
 
 Each CI/CD workflow:
-1. builds/tests/pushes image on `builder-linux-11`
+1. builds/pushes image on `builder-linux-11`
 2. pulls and restarts only its own service on `deploy-linux`
 
 ## Deploy server layout (192.168.3.103)

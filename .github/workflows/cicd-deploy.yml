@@ -76,7 +76,7 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
           SERVICE_NAME: smart_assistant_gateway
           SERVICE_TAG_KEY: GATEWAY_IMAGE_TAG
-          HEALTH_URL: http://127.0.0.1:8080/health
+          HEALTH_PATH: /health
         run: |
           set -euo pipefail
           export DOCKER_CLIENT_TIMEOUT=180
@@ -119,6 +119,12 @@ jobs:
             fi
           }
           set_env "$SERVICE_TAG_KEY" "$IMAGE_TAG"
+
+          GATEWAY_PORT_VALUE="$(sed -n 's/^GATEWAY_PORT=//p' .env | tail -n 1)"
+          if [ -z "${GATEWAY_PORT_VALUE}" ]; then
+            GATEWAY_PORT_VALUE="8080"
+          fi
+          HEALTH_URL="http://127.0.0.1:${GATEWAY_PORT_VALUE}${HEALTH_PATH}"
 
           retry 6 8 docker compose pull "$SERVICE_NAME"
           retry 3 5 docker compose up -d --no-deps "$SERVICE_NAME"
