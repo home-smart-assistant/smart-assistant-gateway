@@ -51,8 +51,8 @@ public class Program
 
 		app.MapGet("/health", async (IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 		{
-			bool agentAlive = await ProbeAsync(httpClientFactory.CreateClient("agent"), ct);
-			bool haAlive = await ProbeAsync(httpClientFactory.CreateClient("haBridge"), ct);
+			bool agentAlive = await ProbeAsync(httpClientFactory.CreateClient("agent"), "/v1/agent/metrics", ct);
+			bool haAlive = await ProbeAsync(httpClientFactory.CreateClient("haBridge"), "/v1/tools/catalog", ct);
 			WakeArbitrationHealthSnapshot wakeHealth = wakeArbitration.GetHealthSnapshot();
 
 			return Results.Ok(new
@@ -465,11 +465,11 @@ public class Program
 		await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
 	}
 
-	private static async Task<bool> ProbeAsync(HttpClient client, CancellationToken ct)
+	private static async Task<bool> ProbeAsync(HttpClient client, string path, CancellationToken ct)
 	{
 		try
 		{
-			using HttpResponseMessage response = await client.GetAsync("/health", ct);
+			using HttpResponseMessage response = await client.GetAsync(path, ct);
 			return response.IsSuccessStatusCode;
 		}
 		catch
